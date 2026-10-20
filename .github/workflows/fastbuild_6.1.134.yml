@@ -1,4 +1,4 @@
-name: 6.1.141 欧加真OKI内核快速构建edit
+name: 6.1.141 欧加真OKI内核快速构建
 
 env:
   TZ: Asia/Shanghai
@@ -259,16 +259,28 @@ jobs:
             if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
               KSU_NAME="SukiSU Ultra"
               KSU_SETUP_URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/main/kernel/setup.sh"
+              # 关键：SukiSU 只有 builtin 分支的 kernel/Kconfig 里才有 KSU_SUSFS* 符号；
+              # main 分支没有这些符号，SUSFS 的 CONFIG 会被 Kconfig 静默丢弃（编出来没有 SUSFS）
+              KSU_SRC_BRANCH="builtin"
             else
               KSU_NAME="BakaSU"
               KSU_SETUP_URL="https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh"
+              KSU_SRC_BRANCH="main"
             fi
-            echo "正在配置${KSU_NAME}..."
-            curl -LSs "$KSU_SETUP_URL" | bash -s main
+            echo "正在配置${KSU_NAME}（分支: ${KSU_SRC_BRANCH}）..."
+            curl -LSs "$KSU_SETUP_URL" | bash -s "$KSU_SRC_BRANCH"
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
             # 生成自定义版本号（基于提交计数）, 失败时使用 114514
-            KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
+            # 版本号：优先按源码 kernel/Kbuild 的公式算（SukiSU: 40000 + commits - 2815），否则回退旧公式（BakaSU: commits + 30700）
+            KSU_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+            if [ -f ./kernel/Kbuild ] && grep -q '^VERSION_BASE' ./kernel/Kbuild; then
+              KSU_BASE=$(awk -F':=' '/^VERSION_BASE/{gsub(/ /,"",$2);print $2;exit}' ./kernel/Kbuild)
+              KSU_OFFSET=$(awk -F':=' '/^VERSION_OFFSET/{gsub(/ /,"",$2);print $2;exit}' ./kernel/Kbuild)
+              KSU_VERSION=$(expr ${KSU_BASE:-40000} + ${KSU_COUNT:-0} - ${KSU_OFFSET:-0} 2>/dev/null || echo 114514)
+            else
+              KSU_VERSION=$(expr ${KSU_COUNT:-0} + 30700 2>/dev/null || echo 114514)
+            fi
             # 存储版本号到 GitHub 环境变量
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
@@ -714,9 +726,9 @@ jobs:
             wget https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
           fi
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ github.event.inputs.kernel_suffix }}.zip
+            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}_${{ github.event.inputs.kernel_suffix }}.zip
           else
-            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ env.KERNEL_NAME }}.zip
+            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}_${{ env.KERNEL_NAME }}.zip
           fi
           zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
