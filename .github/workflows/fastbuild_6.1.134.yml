@@ -1,12 +1,12 @@
-name: 6.1.134 (天玑特供)欧加真OKI内核快速构建
+name: 6.1.141 欧加真OKI内核快速构建edit
 
 env:
   TZ: Asia/Shanghai
   ANDROID_VERSION: 'android14'
   KERNEL_VERSION: '6.1'
-  SUB_VERSION: '134'
+  SUB_VERSION: '141'
   KERNEL_NAME: 'android14-11-o-gca13bffobf09'
-  CCACHE_KEY: ccache-ecsv4-6.1.134
+  CCACHE_KEY: ccache-ecsv4-6.1.141
 
 on:
   workflow_dispatch:
@@ -27,6 +27,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      susfs_meta:
+        description: 'SUSFS版本回退(留空=最新; 数字=回退N个提交; 40位commit hash=指定提交; -1=关闭SUSFS)'
+        required: false
+        type: string
+        default: ''
       kpm_enable:
         description: '是否开启kpm(使用KpatchNext独立实现kpm(支持任意KSU/面具环境); 不需要可保持默认关闭)'
         required: true
@@ -130,9 +135,9 @@ jobs:
           rm -f ./ccache &
           
           echo "正在克隆源码仓库..."
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_oneplus_mt6989/archive/refs/heads/oneplus/mt6989_b_16.0.0_ace5_race.zip -o common.zip && 
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_b_16.0.0_oneplus12_6.1.141.zip -o common.zip && 
           unzip -q common.zip && 
-          mv "android_kernel_oneplus_mt6989-oneplus-mt6989_b_16.0.0_ace5_race" common &&
+          mv "android_kernel_common_oneplus_sm8650-oneplus-sm8650_b_16.0.0_oneplus12_6.1.141" common &&
           rm -rf common.zip &
           
           echo "正在克隆llvm-Clang20工具链..." &&
@@ -251,8 +256,15 @@ jobs:
           # 进入内核工作目录
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
-            echo "正在配置BakaSU（由于SukiSU长期未维护无法正常编译，且BakaSU兼容sukisu管理器，故SukiSU源码仓库已重定向为bakasu）..."
-            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
+            if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+              KSU_NAME="SukiSU Ultra"
+              KSU_SETUP_URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/main/kernel/setup.sh"
+            else
+              KSU_NAME="BakaSU"
+              KSU_SETUP_URL="https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh"
+            fi
+            echo "正在配置${KSU_NAME}..."
+            curl -LSs "$KSU_SETUP_URL" | bash -s main
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
             # 生成自定义版本号（基于提交计数）, 失败时使用 114514
@@ -288,12 +300,28 @@ jobs:
           fi
 
       - name: 应用 KernelSU & SUSFS 补丁
-        if: inputs.susfs_enable
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
         run: |
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
             echo "正在添加susfs补丁..."
-            git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+            SUSFS_META="${{ github.event.inputs.susfs_meta }}"
+            if [ -n "$SUSFS_META" ]; then
+              # 要回退提交就不能浅克隆
+              git clone https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+              cd ./susfs4ksu
+              if [[ "$SUSFS_META" =~ ^[0-9]+$ ]]; then
+                echo "SUSFS 回退 $SUSFS_META 个提交..."
+                git checkout "HEAD~$SUSFS_META"
+              else
+                echo "SUSFS 切换到提交 $SUSFS_META ..."
+                git checkout "$SUSFS_META"
+              fi
+              echo "当前 SUSFS 提交: $(git rev-parse --short HEAD)"
+              cd ..
+            else
+              git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+            fi
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
             cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
             cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -341,7 +369,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: inputs.susfs_enable
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -364,7 +392,7 @@ jobs:
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" || "${{ github.event.inputs.susfs_meta }}" == "-1" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           #添加对 Mountify (backslashxx/mountify) 模块的支持
@@ -392,6 +420,8 @@ jobs:
         if: inputs.better_net
         run: |
           cd kernel_workspace
+          #启用  BPF 流解析器,实现高性能网络流量处理,增强网络监控和分析能力
+          echo "CONFIG_BPF_STREAM_PARSER=y" >> ./common/arch/arm64/configs/gki_defconfig
           #开启增强 Netfilter 防火墙扩展模块,支持基于地址类型的匹配规则,启用 IP 集合支持,提高防火墙规则灵活性,支持更复杂的流量过滤策略
           echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_NETFILTER_XT_SET=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -707,7 +737,7 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
-          echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          echo "susfs: ${{ github.event.inputs.susfs_enable }} (meta: ${{ github.event.inputs.susfs_meta }})" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
@@ -785,10 +815,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat << 'EOF' > release_notes.md
-          ### 📱 欧加真 ${{ env.KSU_TYPENAME }} MT6989 通用内核 | 构建信息
+          ### 📱 欧加真 ${{ env.KSU_TYPENAME }} SM8650 通用内核 | 构建信息
           - 内核版本号: ${{ env.FULL_VERSION }}
           - 编译时间: ${{ env.TIME_FORM }}
-          - 机型：欧加真骁龙8Gen3通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于一加Ace5竞速板 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 版官方OKI源码）
+          - 机型：欧加真骁龙8Gen3通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于一加12 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 版官方OKI源码）
           - KSU分支：${{ env.KSU_TYPENAME }}
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
