@@ -27,6 +27,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      susfs_meta:
+        description: 'SUSFS版本回退(留空=最新; 数字=回退N个提交; 40位commit hash=指定提交; -1=关闭SUSFS)'
+        required: false
+        type: string
+        default: ''
       kpm_enable:
         description: '是否开启kpm(使用KpatchNext独立实现kpm(支持任意KSU/面具环境); 不需要可保持默认关闭)'
         required: true
@@ -251,12 +256,31 @@ jobs:
           # 进入内核工作目录
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
-            echo "正在配置BakaSU（由于SukiSU长期未维护无法正常编译，且BakaSU兼容sukisu管理器，故SukiSU源码仓库已重定向为bakasu）..."
-            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
+            if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+              KSU_NAME="SukiSU Ultra"
+              KSU_SETUP_URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/main/kernel/setup.sh"
+              # 关键：SukiSU 只有 builtin 分支的 kernel/Kconfig 里才有 KSU_SUSFS* 符号；
+              # main 分支没有这些符号，SUSFS 的 CONFIG 会被 Kconfig 静默丢弃（编出来没有 SUSFS）
+              KSU_SRC_BRANCH="builtin"
+            else
+              KSU_NAME="BakaSU"
+              KSU_SETUP_URL="https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh"
+              KSU_SRC_BRANCH="main"
+            fi
+            echo "正在配置${KSU_NAME}（分支: ${KSU_SRC_BRANCH}）..."
+            curl -LSs "$KSU_SETUP_URL" | bash -s "$KSU_SRC_BRANCH"
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
             # 生成自定义版本号（基于提交计数）, 失败时使用 114514
-            KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
+            # 版本号：优先按源码 kernel/Kbuild 的公式算（SukiSU: 40000 + commits - 2815），否则回退旧公式（BakaSU: commits + 30700）
+            KSU_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+            if [ -f ./kernel/Kbuild ] && grep -q '^VERSION_BASE' ./kernel/Kbuild; then
+              KSU_BASE=$(awk -F':=' '/^VERSION_BASE/{gsub(/ /,"",$2);print $2;exit}' ./kernel/Kbuild)
+              KSU_OFFSET=$(awk -F':=' '/^VERSION_OFFSET/{gsub(/ /,"",$2);print $2;exit}' ./kernel/Kbuild)
+              KSU_VERSION=$(expr ${KSU_BASE:-40000} + ${KSU_COUNT:-0} - ${KSU_OFFSET:-0} 2>/dev/null || echo 114514)
+            else
+              KSU_VERSION=$(expr ${KSU_COUNT:-0} + 30700 2>/dev/null || echo 114514)
+            fi
             # 存储版本号到 GitHub 环境变量
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
@@ -288,12 +312,28 @@ jobs:
           fi
 
       - name: 应用 KernelSU & SUSFS 补丁
-        if: inputs.susfs_enable
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
         run: |
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
             echo "正在添加susfs补丁..."
-            git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+            SUSFS_META="${{ github.event.inputs.susfs_meta }}"
+            if [ -n "$SUSFS_META" ]; then
+              # 要回退提交就不能浅克隆
+              git clone https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}-dev
+              cd ./susfs4ksu
+              if [[ "$SUSFS_META" =~ ^[0-9]+$ ]]; then
+                echo "SUSFS 回退 $SUSFS_META 个提交..."
+                git checkout "HEAD~$SUSFS_META"
+              else
+                echo "SUSFS 切换到提交 $SUSFS_META ..."
+                git checkout "$SUSFS_META"
+              fi
+              echo "当前 SUSFS 提交: $(git rev-parse --short HEAD)"
+              cd ..
+            else
+              git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}-dev
+            fi
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
             cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
             cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
@@ -311,7 +351,43 @@ jobs:
             cd ./KernelSU
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
-          
+
+      - name: 修复 SUSFS 缺失的 include / extern（namespace.c hunk #1 失败时）
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
+        run: |
+          cd kernel_workspace/common
+          python3 - <<'PY'
+          def fix(path, block):
+              s = open(path).read()
+              if 'susfs_def.h' in s:
+                  print('skip (already ok):', path); return
+              lines = s.split('\n')
+              idx = max(i for i, l in enumerate(lines[:150]) if l.strip().startswith('#include'))
+              lines[idx+1:idx+1] = block
+              open(path, 'w').write('\n'.join(lines))
+              print('fixed:', path)
+
+          fix('fs/namespace.c', [
+              '#ifdef CONFIG_KSU_SUSFS',
+              '#include <linux/susfs_def.h>',
+              '#endif',
+              '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT',
+              'extern bool susfs_is_current_ksu_domain(void);',
+              'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;',
+              '',
+              '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */',
+              '#endif',
+          ])
+
+          src = open('fs/proc/task_mmu.c').read()
+          if 'SUSFS_IS_INODE' in src:
+              fix('fs/proc/task_mmu.c', [
+                  '#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)',
+                  '#include <linux/susfs_def.h>',
+                  '#endif',
+              ])
+          PY
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
@@ -341,7 +417,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: inputs.susfs_enable
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -364,7 +440,7 @@ jobs:
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" || "${{ github.event.inputs.susfs_meta }}" == "-1" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           #添加对 Mountify (backslashxx/mountify) 模块的支持
@@ -686,9 +762,9 @@ jobs:
             wget https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
           fi
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ github.event.inputs.kernel_suffix }}.zip
+            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}_${{ github.event.inputs.kernel_suffix }}.zip
           else
-            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ env.KERNEL_NAME }}.zip
+            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}_${{ env.KERNEL_NAME }}.zip
           fi
           zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
@@ -709,7 +785,7 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
-          echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          echo "susfs: ${{ github.event.inputs.susfs_enable }} (meta: ${{ github.event.inputs.susfs_meta }})" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
