@@ -320,7 +320,7 @@ jobs:
             SUSFS_META="${{ github.event.inputs.susfs_meta }}"
             if [ -n "$SUSFS_META" ]; then
               # 要回退提交就不能浅克隆
-              git clone https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+              git clone https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}-dev
               cd ./susfs4ksu
               if [[ "$SUSFS_META" =~ ^[0-9]+$ ]]; then
                 echo "SUSFS 回退 $SUSFS_META 个提交..."
@@ -332,7 +332,7 @@ jobs:
               echo "当前 SUSFS 提交: $(git rev-parse --short HEAD)"
               cd ..
             else
-              git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+              git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}-dev
             fi
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
             cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
