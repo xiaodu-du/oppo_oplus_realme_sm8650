@@ -386,6 +386,23 @@ jobs:
                   '#include <linux/susfs_def.h>',
                   '#endif',
               ])
+
+          # 让 SUSFS 上报 AVC log spoofing 能力，否则 SukiSU 管理器会显示“不支持”
+          p = 'fs/susfs.c'
+          s = open(p).read()
+          if 'CONFIG_KSU_SUSFS_AVC_LOG_SPOOFING' not in s:
+              anchor = '\tbuf_ptr = info->enabled_features;'
+              if anchor in s:
+                  add = ('\n\tinfo->err = copy_config_to_buf("CONFIG_KSU_SUSFS_AVC_LOG_SPOOFING\\n", buf_ptr, &copied_size, SUSFS_ENABLED_FEATURES_SIZE);'
+                         '\n\tif (info->err) goto out_copy_to_user;'
+                         '\n\tbuf_ptr = info->enabled_features + copied_size;')
+                  s = s.replace(anchor, anchor + add, 1)
+                  open(p, 'w').write(s)
+                  print('susfs feature advert: patched')
+              else:
+                  print('susfs feature advert: anchor not found')
+          else:
+              print('susfs feature advert: already present')
           PY
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
