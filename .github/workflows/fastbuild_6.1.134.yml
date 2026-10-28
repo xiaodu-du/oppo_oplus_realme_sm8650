@@ -351,7 +351,41 @@ jobs:
             cd ./KernelSU
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
-          
+
+      - name: 修复 SUSFS 缺失的 include / extern（namespace.c hunk #1 失败时）
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
+        run: |
+          cd kernel_workspace/common
+          python3 - <<'PY'
+          def fix(path, block):
+              s = open(path).read()
+              if 'susfs_def.h' in s:
+                  print('skip (already ok):', path); return
+              lines = s.split('\n')
+              idx = max(i for i, l in enumerate(lines[:150]) if l.strip().startswith('#include'))
+              lines[idx+1:idx+1] = block
+              open(path, 'w').write('\n'.join(lines))
+              print('fixed:', path)
+
+          fix('fs/namespace.c', [
+              '#ifdef CONFIG_KSU_SUSFS',
+              '#include <linux/susfs_def.h>',
+              '#endif',
+              '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT',
+              'extern bool susfs_is_current_ksu_domain(void);',
+              'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;',
+              '#endif',
+          ])
+
+          src = open('fs/proc/task_mmu.c').read()
+          if 'SUSFS_IS_INODE' in src:
+              fix('fs/proc/task_mmu.c', [
+                  '#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)',
+                  '#include <linux/susfs_def.h>',
+                  '#endif',
+              ])
+          PY
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
