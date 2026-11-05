@@ -384,6 +384,32 @@ jobs:
           print('safemode patch: applied (boot window 120s + boot_completed guard)')
           PY
 
+      - name: 适配新 SUSFS（补 KSU_SUSFS_PRIORITY_UID_FILTER 配置项）
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1' && (github.event.inputs.ksu_type == 'sukisu' || github.event.inputs.ksu_type == 'bakasu')
+        run: |
+          cd kernel_workspace
+          python3 - <<'PY'
+          p = 'KernelSU/kernel/Kconfig'
+          s = open(p).read()
+          if 'KSU_SUSFS_PRIORITY_UID_FILTER' in s:
+              print('kconfig: already present')
+              raise SystemExit(0)
+          anchor = 'config KSU_SUSFS_SUS_PATH\n'
+          if anchor not in s:
+              print('kconfig: anchor not found')
+              raise SystemExit(1)
+          block = ('config KSU_SUSFS_PRIORITY_UID_FILTER\n'
+                   '\tbool "Enable getpriority UID filter"\n'
+                   '\tdepends on KSU_SUSFS\n'
+                   '\tdefault y\n'
+                   '\thelp\n'
+                   '\t  Enable the priority UID filter feature of SUSFS.\n'
+                   '\n')
+          s = s.replace(anchor, block + anchor, 1)
+          open(p, 'w').write(s)
+          print('kconfig: added KSU_SUSFS_PRIORITY_UID_FILTER')
+          PY
+
       - name: 修复 SUSFS 缺失的 include / extern（namespace.c hunk #1 失败时）
         if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
         run: |
@@ -472,6 +498,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
