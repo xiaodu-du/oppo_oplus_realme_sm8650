@@ -352,6 +352,36 @@ jobs:
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
 
+      - name: 修复安全模式误触发（音量键只在开机窗口内计数）
+        if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1' && (github.event.inputs.ksu_type == 'sukisu' || github.event.inputs.ksu_type == 'bakasu')
+        run: |
+          cd kernel_workspace
+          if [ ! -f KernelSU/kernel/runtime/ksud.c ]; then
+            echo "未找到 KernelSU/kernel/runtime/ksud.c，跳过"
+            exit 0
+          fi
+          python3 - <<'PY'
+          p = 'KernelSU/kernel/runtime/ksud.c'
+          s = open(p).read()
+          if 'KSU_SAFEMODE_BOOT_WINDOW' in s:
+              print('safemode patch: already present')
+              raise SystemExit(0)
+          anchor = ('static void vol_detector_event(struct input_handle *handle, '
+                    'unsigned int type, unsigned int code, int value)\n{\n')
+          if anchor not in s:
+              print('safemode patch: anchor not found')
+              raise SystemExit(1)
+          if '#include <linux/ktime.h>' not in s:
+              s = '#include <linux/ktime.h>\n' + s
+          guard = (anchor +
+                   '    /* KSU_SAFEMODE_BOOT_WINDOW: only count volume keys during early boot */\n'
+                   '    if (ksu_boot_completed || ktime_get_boottime_seconds() > 120)\n'
+                   '        return;\n')
+          s = s.replace(anchor, guard, 1)
+          open(p, 'w').write(s)
+          print('safemode patch: applied (boot window 120s + boot_completed guard)')
+          PY
+
       - name: 修复 SUSFS 缺失的 include / extern（namespace.c hunk #1 失败时）
         if: inputs.susfs_enable && github.event.inputs.susfs_meta != '-1'
         run: |
