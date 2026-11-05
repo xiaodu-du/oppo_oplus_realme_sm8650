@@ -261,18 +261,16 @@ jobs:
               KSU_SETUP_URL="https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/refs/heads/main/kernel/setup.sh"
               # 关键：SukiSU 只有 builtin 分支的 kernel/Kconfig 里才有 KSU_SUSFS* 符号；
               # main 分支没有这些符号，SUSFS 的 CONFIG 会被 Kconfig 静默丢弃（编出来没有 SUSFS）
-              # 固定到 v4.3.0 (85d3b048)：更新的 builtin（如 1cfa573）会调用 SUSFS 新 API
-              # susfs_add_sus_type / susfs_add_sus_avd_allowed_by_type，
-              # 而 cctv18/susfs4oki 的 dev 分支（2026-10-24）还没有这些函数，vmlinux 链接会失败。
+              # SUSFS 源已切到 ShirkNeko/susfs4ksu（已同步上游，含 susfs_add_sus_type 等新 API），
+              # 因此这里用 builtin 最新提交，不再钉版本。
               KSU_SRC_BRANCH="builtin"
-              KSU_SRC_REF="85d3b0483df224f1dcf6f2880b3181d3f2ca4e0f"
             else
               KSU_NAME="BakaSU"
               KSU_SETUP_URL="https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh"
               KSU_SRC_BRANCH="main"
             fi
-            echo "正在配置${KSU_NAME}（分支: ${KSU_SRC_BRANCH}，ref: ${KSU_SRC_REF:-默认}）..."
-            curl -LSs "$KSU_SETUP_URL" | bash -s "${KSU_SRC_REF:-$KSU_SRC_BRANCH}"
+            echo "正在配置${KSU_NAME}（分支: ${KSU_SRC_BRANCH}）..."
+            curl -LSs "$KSU_SETUP_URL" | bash -s "$KSU_SRC_BRANCH"
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
             # 生成自定义版本号（基于提交计数）, 失败时使用 114514
@@ -324,7 +322,7 @@ jobs:
             SUSFS_META="${{ github.event.inputs.susfs_meta }}"
             if [ -n "$SUSFS_META" ]; then
               # 要回退提交就不能浅克隆
-              git clone https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}-dev
+              git clone https://github.com/ShirkNeko/susfs4ksu.git susfs4ksu -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
               cd ./susfs4ksu
               if [[ "$SUSFS_META" =~ ^[0-9]+$ ]]; then
                 echo "SUSFS 回退 $SUSFS_META 个提交..."
@@ -336,7 +334,7 @@ jobs:
               echo "当前 SUSFS 提交: $(git rev-parse --short HEAD)"
               cd ..
             else
-              git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}-dev
+              git clone --depth=1 https://github.com/ShirkNeko/susfs4ksu.git susfs4ksu -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
             fi
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
             cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
